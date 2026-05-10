@@ -1,0 +1,17 @@
+{
+  "name": "trabajopracticogads1-backend",
+  "version": "1.0.0",
+  "description": "REST API para Labor Pulse – ABM de empleados, horarios, fichadas, novedades y cierres",
+  "main": "src/app.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2"
+  }
+}
