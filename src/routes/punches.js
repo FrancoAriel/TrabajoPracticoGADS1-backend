@@ -4,22 +4,43 @@ import { ok, created, notFound, badRequest, serverError } from '../lib/response.
 
 const router = Router()
 
+/** Filtros de listado sobre la consulta de fichadas (con join empleado). */
+function applyListFilters(q, { search, type, origin, date }) {
+  let qq = q
+  if (type) qq = qq.eq('tipo', type)
+  if (origin) qq = qq.eq('origen', origin)
+  if (date) {
+    qq = qq
+      .gte('fecha_hora', `${date}T00:00:00`)
+      .lte('fecha_hora', `${date}T23:59:59`)
+  }
+  if (search) {
+    const t = String(search).trim()
+    if (/^\d+$/.test(t))
+      qq = qq.eq('legajo', Number(t))
+    else {
+      const pat = `%${t}%`
+      qq = qq.or(`nombre.ilike.${pat},apellido.ilike.${pat}`, { foreignTable: 'empleado' })
+    }
+  }
+  return qq
+}
+
 // GET /punches
 router.get('/', async (req, res) => {
   try {
     const { search, type, origin, date, page = 1, pageSize = 10 } = req.query
-    const from = (page - 1) * pageSize
-    const to   = from + Number(pageSize) - 1
+    const ps = Number(pageSize) || 10
+    const from = (Number(page) - 1) * ps
+    const to   = from + ps - 1
 
-    let query = supabase
-      .from('fichada')
-      .select('*, empleado(nombre, apellido)', { count: 'exact' })
+    const baseSelect = () =>
+      applyListFilters(
+        supabase.from('fichada').select('*, empleado(nombre, apellido)', { count: 'exact' }),
+        { search, type, origin, date },
+      )
 
-    if (type)   query = query.eq('tipo', type)
-    if (origin) query = query.eq('origen', origin)
-    if (date)   query = query.gte('fecha_hora', `${date}T00:00:00`).lte('fecha_hora', `${date}T23:59:59`)
-    if (search) query = query.or(`empleado.nombre.ilike.%${search}%,empleado.apellido.ilike.%${search}%`)
-
+    let query = baseSelect()
     query = query.order('fecha_hora', { ascending: false }).range(from, to)
 
     const { data, count, error } = await query
@@ -36,9 +57,30 @@ router.get('/', async (req, res) => {
       correction:   p.es_correccion
     }))
 
+    let stats
+    if (date) {
+      const dayBegin = `${date}T00:00:00`
+      const dayEnd   = `${date}T23:59:59`
+      const dayScope = () =>
+        supabase.from('fichada').select('*', { count: 'exact', head: true }).gte('fecha_hora', dayBegin).lte('fecha_hora', dayEnd)
+
+      const [{ count: totalDelDía }, { count: entradas }, { count: salidas }, { count: porRevisar }] = await Promise.all([
+        dayScope(),
+        dayScope().eq('tipo', 'Entrada'),
+        dayScope().eq('tipo', 'Salida'),
+        dayScope().or('es_correccion.eq.true,origen.eq.Manual'),
+      ])
+      stats = {
+        totalDelDía: totalDelDía ?? 0,
+        entradas:    entradas ?? 0,
+        salidas:     salidas ?? 0,
+        porRevisar:  porRevisar ?? 0,
+      }
+    }
+
     return ok(res,
-      { items },
-      { page: Number(page), pageSize: Number(pageSize), totalItems: count ?? 0, totalPages: Math.ceil((count ?? 0) / pageSize) }
+      { items, stats },
+      { page: Number(page), pageSize: ps, totalItems: count ?? 0, totalPages: Math.ceil((count ?? 0) / ps) },
     )
   } catch (err) {
     serverError(res, err)
@@ -78,9 +120,21 @@ router.post('/manual', async (req, res) => {
     if (!legajo || !fechaHora || !tipo)
       return badRequest(res, 'legajo, fechaHora y tipo son requeridos')
 
+    const legajoNum =
+      typeof legajo === 'string' ? Number(legajo.replace(/\D/g, '')) : Number(legajo)
+    if (!Number.isFinite(legajoNum))
+      return badRequest(res, 'legajo inválido')
+
     const { data, error } = await supabase
       .from('fichada')
-      .insert({ legajo, fecha_hora: fechaHora, tipo, origen: 'manual', es_correccion: false, id_usuario_registro: idUsuarioRegistro })
+      .insert({
+        legajo: legajoNum,
+        fecha_hora: fechaHora,
+        tipo,
+        origen: 'Manual',
+        es_correccion: false,
+        id_usuario_registro: idUsuarioRegistro,
+      })
       .select()
       .single()
 
@@ -108,7 +162,15 @@ router.post('/:id/corrections', async (req, res) => {
 
     const { data, error } = await supabase
       .from('fichada')
-      .insert({ legajo: original.legajo, fecha_hora: fechaHora, tipo, origen: 'manual', es_correccion: true, id_fichada_original: Number(req.params.id), id_usuario_registro: idUsuarioRegistro })
+      .insert({
+        legajo: original.legajo,
+        fecha_hora: fechaHora,
+        tipo,
+        origen: 'Manual',
+        es_correccion: true,
+        id_fichada_original: Number(req.params.id),
+        id_usuario_registro: idUsuarioRegistro,
+      })
       .select()
       .single()
 
