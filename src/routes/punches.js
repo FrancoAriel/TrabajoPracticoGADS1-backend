@@ -1,8 +1,51 @@
 import { Router } from 'express'
 import supabase from '../lib/supabase.js'
 import { ok, created, notFound, badRequest, serverError } from '../lib/response.js'
+import { evaluateEmployeeDay } from '../services/attendanceEvaluation.js'
 
 const router = Router()
+
+/** Valores enum en BD: Entrada | Salida */
+function normalizeTipoFichada(t) {
+  const s = String(t ?? '').trim().toLowerCase()
+  if (s === 'entrada') return 'Entrada'
+  if (s === 'salida') return 'Salida'
+  return String(t ?? '').trim()
+}
+
+/** Carga marcaciones referenciadas por `id_fichada_original` (el embed self-join suele venir vacío en PostgREST). */
+async function originalsByIds(supabase, rows) {
+  const ids = [
+    ...new Set(
+      (rows ?? [])
+        .filter((r) => r.es_correccion && r.id_fichada_original != null)
+        .map((r) => Number(r.id_fichada_original))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  ]
+  if (!ids.length) return new Map()
+  const { data, error } = await supabase
+    .from('fichada')
+    .select('id_fichada, fecha_hora, tipo, origen')
+    .in('id_fichada', ids)
+  if (error) throw error
+  const m = new Map()
+  for (const o of data ?? []) m.set(o.id_fichada, o)
+  return m
+}
+
+async function fetchOriginalRow(supabase, idFichadaOriginal) {
+  if (idFichadaOriginal == null) return null
+  const id = Number(idFichadaOriginal)
+  if (!Number.isFinite(id) || id <= 0) return null
+  const { data, error } = await supabase
+    .from('fichada')
+    .select('id_fichada, fecha_hora, tipo, origen')
+    .eq('id_fichada', id)
+    .maybeSingle()
+  if (error) throw error
+  return data ?? null
+}
 
 /** Filtros de listado sobre la consulta de fichadas (con join empleado). */
 function applyListFilters(q, { search, type, origin, date }) {
@@ -46,16 +89,29 @@ router.get('/', async (req, res) => {
     const { data, count, error } = await query
     if (error) throw error
 
-    const items = (data ?? []).map(p => ({
-      id:           p.id_fichada,
-      employeeId:   p.legajo,
-      legajo:       String(p.legajo).padStart(4, '0'),
-      employeeName: p.empleado ? `${p.empleado.nombre} ${p.empleado.apellido}` : null,
-      timestamp:    p.fecha_hora,
-      type:         p.tipo,
-      origin:       p.origen,
-      correction:   p.es_correccion
-    }))
+    const originalsMap = await originalsByIds(supabase, data ?? [])
+
+    const items = (data ?? []).map((p) => {
+      const orig = originalsMap.get(Number(p.id_fichada_original)) ?? null
+      return {
+        id:           p.id_fichada,
+        employeeId:   p.legajo,
+        legajo:       String(p.legajo).padStart(4, '0'),
+        employeeName: p.empleado ? `${p.empleado.nombre} ${p.empleado.apellido}` : null,
+        timestamp:    p.fecha_hora,
+        type:         p.tipo,
+        origin:       p.origen,
+        correction:   p.es_correccion,
+        originalId:   p.id_fichada_original ?? null,
+        ...(orig
+          ? {
+              originalTimestamp: orig.fecha_hora,
+              originalType: orig.tipo,
+              originalOrigin: orig.origen,
+            }
+          : {}),
+      }
+    })
 
     let stats
     if (date) {
@@ -98,6 +154,7 @@ router.get('/:id', async (req, res) => {
 
     if (error || !data) return notFound(res, 'Fichada no encontrada')
 
+    const orig = await fetchOriginalRow(supabase, data.id_fichada_original)
     return ok(res, {
       id:           data.id_fichada,
       employeeId:   data.legajo,
@@ -106,7 +163,14 @@ router.get('/:id', async (req, res) => {
       type:         data.tipo,
       origin:       data.origen,
       correction:   data.es_correccion,
-      originalId:   data.id_fichada_original
+      originalId:   data.id_fichada_original ?? null,
+      ...(orig
+        ? {
+            originalTimestamp: orig.fecha_hora,
+            originalType: orig.tipo,
+            originalOrigin: orig.origen,
+          }
+        : {}),
     })
   } catch (err) {
     serverError(res, err)
@@ -125,12 +189,14 @@ router.post('/manual', async (req, res) => {
     if (!Number.isFinite(legajoNum))
       return badRequest(res, 'legajo inválido')
 
+    const tipoNorm = normalizeTipoFichada(tipo)
+
     const { data, error } = await supabase
       .from('fichada')
       .insert({
         legajo: legajoNum,
         fecha_hora: fechaHora,
-        tipo,
+        tipo: tipoNorm,
         origen: 'Manual',
         es_correccion: false,
         id_usuario_registro: idUsuarioRegistro,
@@ -139,7 +205,19 @@ router.post('/manual', async (req, res) => {
       .single()
 
     if (error) throw error
-    return created(res, data)
+
+    const fecha = String(fechaHora).slice(0, 10)
+    let attendanceEvaluation = null
+    if (tipoNorm === 'Entrada' && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      try {
+        attendanceEvaluation = await evaluateEmployeeDay(supabase, legajoNum, fecha, { dryRun: false })
+      } catch (e) {
+        console.error('[attendanceEvaluation] post manual fichada', e)
+        attendanceEvaluation = { kind: 'error', legajo: legajoNum, details: { message: e?.message ?? String(e) } }
+      }
+    }
+
+    return created(res, { fichada: data, attendanceEvaluation })
   } catch (err) {
     serverError(res, err)
   }

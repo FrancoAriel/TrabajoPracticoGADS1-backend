@@ -11,6 +11,7 @@ import schedulesRouter  from './routes/schedules.js'
 import newsRouter       from './routes/news.js'
 import closuresRouter   from './routes/closures.js'
 import exportsRouter    from './routes/exports.js'
+import reasoningRouter  from './routes/reasoning.js'
 
 const app = express()
 
@@ -26,6 +27,7 @@ app.use('/api/schedules', schedulesRouter)
 app.use('/api/news',      newsRouter)
 app.use('/api/closures',  closuresRouter)
 app.use('/api/exports',   exportsRouter)
+app.use('/api/reasoning', reasoningRouter)
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }))
 

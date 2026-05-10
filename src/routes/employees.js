@@ -211,6 +211,7 @@ router.patch('/:id', async (req, res) => {
     if (req.body.fechaEgreso  !== undefined) updates.fecha_egreso      = req.body.fechaEgreso  || null
     if (req.body.categoria    !== undefined) updates.categoria_laboral = req.body.categoria    || null
     if (req.body.jornada      !== undefined) updates.tipo_jornada      = req.body.jornada      || null
+    if (req.body.status !== undefined) updates.estado = req.body.status
     // convenio vacío → NULL
     if ('convenio' in updates) updates.convenio = updates.convenio || null
 
@@ -259,9 +260,15 @@ router.post('/:id/assignments', async (req, res) => {
       return badRequest(res, 'targetId y fechaDesde son requeridos')
 
     if (type === 'ciclo') {
+      const { fechaHasta } = req.body
       const { data, error } = await supabase
         .from('empleado_ciclo')
-        .insert({ legajo: req.params.id, id_ciclo: targetId, fecha_inicio: fechaDesde })
+        .insert({
+          legajo: req.params.id,
+          id_ciclo: targetId,
+          fecha_inicio: fechaDesde,
+          fecha_fin: fechaHasta === undefined ? null : fechaHasta === '' ? null : fechaHasta,
+        })
         .select()
         .single()
       if (error) throw error

@@ -10,6 +10,13 @@ router.get('/', async (_req, res) => {
     const { data: horarios } = await supabase
       .from('horario')
       .select('id_horario, nombre, tipo')
+      .eq('estado', 'Activo')
+      .order('nombre')
+
+    const { data: ciclos } = await supabase
+      .from('ciclo_horario')
+      .select('id_ciclo, nombre, duracion_dias')
+      .eq('estado', 'Activo')
       .order('nombre')
 
     return ok(res, {
@@ -26,7 +33,8 @@ router.get('/', async (_req, res) => {
       estadosNovedad:  ['pendiente', 'aprobada', 'rechazada'],
       rolesUsuario:    ['admin', 'empleado', 'contador'],
       formatosExport:  ['CSV', 'PDF', 'XLSX'],
-      horarios:        (horarios ?? []).map(h => ({ id: h.id_horario, nombre: h.nombre, tipo: h.tipo }))
+      horarios:        (horarios ?? []).map(h => ({ id: h.id_horario, nombre: h.nombre, tipo: h.tipo })),
+      ciclos:          (ciclos ?? []).map(c => ({ id: c.id_ciclo, nombre: c.nombre, duracionDias: c.duracion_dias }))
     })
   } catch (err) {
     serverError(res, err)
