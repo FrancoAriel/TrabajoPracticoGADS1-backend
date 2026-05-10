@@ -2,6 +2,28 @@ import { Router } from 'express'
 import supabase from '../lib/supabase.js'
 import { ok, created, notFound, badRequest, serverError } from '../lib/response.js'
 
+/** Etiquetas de UI alta/edición ↔ enum origen_fichada en BD */
+const FICHADA_UI_A_DB = {
+  'Biométrico':    'Biometrico',
+  'App móvil':     'Api',
+  'PIN / Teclado': 'Pin',
+  'QR':            'Qr',
+  'Manual':        'Manual',
+}
+const FICHADA_DB_A_UI = Object.fromEntries(
+  Object.entries(FICHADA_UI_A_DB).map(([ui, db]) => [db, ui]),
+)
+
+function fichadaUiToDb(label) {
+  if (label == null || label === '') return null
+  return FICHADA_UI_A_DB[label] ?? null
+}
+
+function fichadaDbToUi(value) {
+  if (value == null || value === '') return ''
+  return FICHADA_DB_A_UI[value] ?? String(value)
+}
+
 const router = Router()
 
 // GET /employees
@@ -23,27 +45,35 @@ router.get('/', async (req, res) => {
     const { data, count, error } = await query
     if (error) throw error
 
-    const [{ count: active }, { count: partial }] = await Promise.all([
-      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('estado', 'activo'),
-      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('tipo_jornada', 'parcial')
+    const [{ count: active }, { count: partial }, { count: fullTime }] = await Promise.all([
+      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('estado', 'Activo'),
+      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('tipo_jornada', 'Parcial'),
+      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('tipo_jornada', 'Completa')
     ])
 
     const items = (data ?? []).map(e => {
       const asig = e.asignacion_horario?.find(a => !a.fecha_hasta) ?? e.asignacion_horario?.[0]
+      const jornadaHoras =
+        e.tipo_jornada === 'Parcial' && e.horas_jornada_parcial != null
+          ? `${String(Number(e.horas_jornada_parcial)).replace(/\.0$/, '')}hs`
+          : null
       return {
         id:       e.legajo,
         legajo:   String(e.legajo).padStart(4, '0'),
         name:     `${e.nombre} ${e.apellido}`,
+        dni:      e.dni,
         category: e.categoria_laboral ?? null,
         convenio: e.convenio ?? null,
         jornada:  e.tipo_jornada,
+        jornadaHoras,
         schedule: asig?.horario?.nombre ?? null,
-        status:   e.estado
+        status:    e.estado,
+        fichada:   fichadaDbToUi(e.modalidad_fichada) || null
       }
     })
 
     return ok(res,
-      { items, stats: { active: active ?? 0, partial: partial ?? 0 } },
+      { items, stats: { active: active ?? 0, partial: partial ?? 0, jornadaCompleta: fullTime ?? 0, jornadaParcial: partial ?? 0 } },
       { page: Number(page), pageSize: Number(pageSize), totalItems: count ?? 0, totalPages: Math.ceil((count ?? 0) / pageSize) }
     )
   } catch (err) {
@@ -79,6 +109,9 @@ router.get('/:id', async (req, res) => {
       .order('fecha_creacion', { ascending: false })
       .limit(5)
 
+    const parcialHorasVal =
+      data.horas_jornada_parcial != null ? Number(data.horas_jornada_parcial) : null
+
     return ok(res, {
       employee: {
         id:       data.legajo,
@@ -90,8 +123,10 @@ router.get('/:id', async (req, res) => {
         category: data.categoria_laboral,
         convenio: data.convenio,
         jornada:  data.tipo_jornada,
+        parcialHoras: parcialHorasVal,
         fechaIngreso: data.fecha_ingreso,
-        fechaEgreso:  data.fecha_egreso
+        fechaEgreso:  data.fecha_egreso,
+        modalidadFichada: fichadaDbToUi(data.modalidad_fichada) || null,
       },
       scheduleConfig: {
         schedule: asig?.horario?.nombre ?? null,
@@ -123,13 +158,36 @@ router.get('/:id', async (req, res) => {
 // POST /employees
 router.post('/', async (req, res) => {
   try {
-    const { nombre, apellido, dni, cuil, fechaIngreso, categoria, convenio, jornada, estado = 'activo' } = req.body
+    const { nombre, apellido, dni, cuil, fechaIngreso, categoria, convenio, jornada, parcialHoras, fichada, estado = 'Activo' } = req.body
     if (!nombre || !apellido || !dni || !cuil || !fechaIngreso || !jornada)
       return badRequest(res, 'Faltan campos requeridos: nombre, apellido, dni, cuil, fechaIngreso, jornada')
 
+    if (jornada === 'Parcial') {
+      if (parcialHoras === undefined || parcialHoras === '' || parcialHoras === null || Number.isNaN(Number(parcialHoras)))
+        return badRequest(res, 'Indicá las horas diarias para jornada parcial.')
+    }
+
+    const horas_jornada_parcial = jornada === 'Parcial' ? Number(parcialHoras) : null
+
+    let modalidad_fichada = fichadaUiToDb(fichada)
+    if (!modalidad_fichada && fichada) return badRequest(res, 'Modalidad de fichada no válida.')
+    modalidad_fichada ??= 'Biometrico'
+
     const { data, error } = await supabase
       .from('empleado')
-      .insert({ nombre, apellido, dni, cuil, fecha_ingreso: fechaIngreso, categoria_laboral: categoria, convenio, tipo_jornada: jornada, estado })
+      .insert({
+        nombre,
+        apellido,
+        dni,
+        cuil,
+        fecha_ingreso: fechaIngreso,
+        categoria_laboral: categoria || null,
+        convenio: convenio || null,
+        tipo_jornada: jornada,
+        estado,
+        horas_jornada_parcial,
+        modalidad_fichada,
+      })
       .select('legajo')
       .single()
 
@@ -143,16 +201,34 @@ router.post('/', async (req, res) => {
 // PATCH /employees/:id
 router.patch('/:id', async (req, res) => {
   try {
-    const allowed = ['nombre', 'apellido', 'dni', 'cuil', 'fecha_ingreso', 'fecha_egreso', 'categoria_laboral', 'convenio', 'tipo_jornada', 'estado']
+    const allowed = ['nombre', 'apellido', 'dni', 'cuil', 'fecha_ingreso', 'fecha_egreso', 'categoria_laboral', 'convenio', 'tipo_jornada', 'estado', 'horas_jornada_parcial', 'modalidad_fichada']
     const updates = {}
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key]
     }
     // También aceptar camelCase del frontend
-    if (req.body.fechaIngreso)   updates.fecha_ingreso    = req.body.fechaIngreso
-    if (req.body.fechaEgreso)    updates.fecha_egreso     = req.body.fechaEgreso
-    if (req.body.categoria)      updates.categoria_laboral = req.body.categoria
-    if (req.body.jornada)        updates.tipo_jornada     = req.body.jornada
+    if (req.body.fechaIngreso !== undefined) updates.fecha_ingreso     = req.body.fechaIngreso || null
+    if (req.body.fechaEgreso  !== undefined) updates.fecha_egreso      = req.body.fechaEgreso  || null
+    if (req.body.categoria    !== undefined) updates.categoria_laboral = req.body.categoria    || null
+    if (req.body.jornada      !== undefined) updates.tipo_jornada      = req.body.jornada      || null
+    // convenio vacío → NULL
+    if ('convenio' in updates) updates.convenio = updates.convenio || null
+
+    if (req.body.parcialHoras !== undefined) {
+      const v = req.body.parcialHoras
+      updates.horas_jornada_parcial =
+        v === '' || v === null ? null : Number(v)
+    }
+    if (updates.tipo_jornada === 'Completa') updates.horas_jornada_parcial = null
+
+    if (req.body.fichada !== undefined) {
+      const m = fichadaUiToDb(req.body.fichada)
+      updates.modalidad_fichada = req.body.fichada === '' || req.body.fichada == null
+        ? null
+        : m
+      if (req.body.fichada !== '' && req.body.fichada != null && !m)
+        return badRequest(res, 'Modalidad de fichada no válida.')
+    }
 
     const { error } = await supabase.from('empleado').update(updates).eq('legajo', req.params.id)
     if (error) throw error
@@ -215,7 +291,7 @@ router.post('/:id/news', async (req, res) => {
       .from('novedad')
       .insert({
         legajo: req.params.id, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta,
-        cantidad, unidad, estado: 'pendiente', origen: 'manual',
+        cantidad, unidad, estado: 'Pendiente', origen: 'Manual',
         observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion
       })
       .select()
@@ -237,7 +313,7 @@ router.post('/:id/manual-punches', async (req, res) => {
 
     const { data, error } = await supabase
       .from('fichada')
-      .insert({ legajo: req.params.id, fecha_hora: fechaHora, tipo, origen: 'manual', es_correccion: false, id_usuario_registro: idUsuarioRegistro })
+      .insert({ legajo: req.params.id, fecha_hora: fechaHora, tipo, origen: 'Manual', es_correccion: false, id_usuario_registro: idUsuarioRegistro })
       .select()
       .single()
 

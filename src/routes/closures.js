@@ -10,7 +10,7 @@ router.get('/current', async (_req, res) => {
     const { data: current } = await supabase
       .from('cierre_mensual')
       .select('*, usuario(nombre)')
-      .eq('estado', 'borrador')
+      .eq('estado', 'Borrador')
       .order('fecha_cierre', { ascending: false })
       .limit(1)
       .maybeSingle()
@@ -18,13 +18,13 @@ router.get('/current', async (_req, res) => {
     const { data: history } = await supabase
       .from('cierre_mensual')
       .select('id_cierre, periodo, fecha_cierre, estado')
-      .eq('estado', 'cerrado')
+      .eq('estado', 'Cerrado')
       .order('fecha_cierre', { ascending: false })
       .limit(6)
 
     const [{ count: liquidated }, { count: pending }] = await Promise.all([
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'aprobada'),
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente')
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Aprobada'),
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Pendiente')
     ])
 
     return ok(res, {
@@ -55,7 +55,7 @@ router.post('/', async (req, res) => {
 
     const { data, error } = await supabase
       .from('cierre_mensual')
-      .insert({ periodo, fecha_cierre: fechaCierre, estado: 'borrador', id_usuario: idUsuario, archivo_exportado: archivoExportado })
+      .insert({ periodo, fecha_cierre: fechaCierre, estado: 'Borrador', id_usuario: idUsuario, archivo_exportado: archivoExportado })
       .select()
       .single()
 
@@ -76,14 +76,14 @@ router.post('/:id/run', async (req, res) => {
       .single()
 
     if (fetchErr || !closure) return notFound(res, 'Cierre no encontrado')
-    if (closure.estado === 'cerrado')
+    if (closure.estado === 'Cerrado')
       return badRequest(res, 'El cierre ya está en estado cerrado')
 
     // Snapshot de novedades aprobadas del período
     const { data: novedades } = await supabase
       .from('novedad')
       .select('*')
-      .eq('estado', 'aprobada')
+      .eq('estado', 'Aprobada')
 
     if ((novedades ?? []).length > 0) {
       const detalles = novedades.map(n => ({
@@ -104,12 +104,12 @@ router.post('/:id/run', async (req, res) => {
 
     const { error: updateErr } = await supabase
       .from('cierre_mensual')
-      .update({ estado: 'cerrado' })
+      .update({ estado: 'Cerrado' })
       .eq('id_cierre', req.params.id)
 
     if (updateErr) throw updateErr
 
-    return ok(res, { id: req.params.id, estado: 'cerrado', novedadesIncluidas: (novedades ?? []).length })
+    return ok(res, { id: req.params.id, estado: 'Cerrado', novedadesIncluidas: (novedades ?? []).length })
   } catch (err) {
     serverError(res, err)
   }

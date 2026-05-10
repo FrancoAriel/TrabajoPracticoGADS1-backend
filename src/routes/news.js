@@ -25,9 +25,9 @@ router.get('/', async (req, res) => {
     if (error) throw error
 
     const [{ count: pending }, { count: approved }, { count: rejected }] = await Promise.all([
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente'),
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'aprobada'),
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'rechazada')
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Pendiente'),
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Aprobada'),
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Rechazada')
     ])
 
     const items = (data ?? []).map(n => ({
@@ -62,7 +62,7 @@ router.post('/', async (req, res) => {
 
     const { data, error } = await supabase
       .from('novedad')
-      .insert({ legajo, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta, cantidad, unidad, estado: 'pendiente', origen: 'manual', observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion })
+      .insert({ legajo, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta, cantidad, unidad, estado: 'Pendiente', origen: 'Manual', observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion })
       .select()
       .single()
 
@@ -78,11 +78,11 @@ router.post('/:id/approve', async (req, res) => {
   try {
     const { error } = await supabase
       .from('novedad')
-      .update({ estado: 'aprobada' })
+      .update({ estado: 'Aprobada' })
       .eq('id_novedad', req.params.id)
 
     if (error) throw error
-    return ok(res, { id: req.params.id, estado: 'aprobada' })
+    return ok(res, { id: req.params.id, estado: 'Aprobada' })
   } catch (err) {
     serverError(res, err)
   }
@@ -97,11 +97,11 @@ router.post('/:id/reject', async (req, res) => {
     const { data: current } = await supabase.from('novedad').select('observacion').eq('id_novedad', req.params.id).single()
     const { error } = await supabase
       .from('novedad')
-      .update({ estado: 'rechazada', observacion: [current?.observacion, obs].filter(Boolean).join(' | ') })
+      .update({ estado: 'Rechazada', observacion: [current?.observacion, obs].filter(Boolean).join(' | ') })
       .eq('id_novedad', req.params.id)
 
     if (error) throw error
-    return ok(res, { id: req.params.id, estado: 'rechazada' })
+    return ok(res, { id: req.params.id, estado: 'Rechazada' })
   } catch (err) {
     serverError(res, err)
   }

@@ -12,9 +12,9 @@ router.get('/', async (_req, res) => {
       { count: pendingNews },
       { data: closure }
     ] = await Promise.all([
-      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('estado', 'activo'),
-      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente'),
-      supabase.from('cierre_mensual').select('periodo, estado').eq('estado', 'borrador').order('fecha_cierre', { ascending: false }).limit(1).maybeSingle()
+      supabase.from('empleado').select('*', { count: 'exact', head: true }).eq('estado', 'Activo'),
+      supabase.from('novedad').select('*', { count: 'exact', head: true }).eq('estado', 'Pendiente'),
+      supabase.from('cierre_mensual').select('periodo, estado').eq('estado', 'Borrador').order('fecha_cierre', { ascending: false }).limit(1).maybeSingle()
     ])
 
     return ok(res, {
