@@ -15,7 +15,24 @@ import reasoningRouter  from './routes/reasoning.js'
 
 const app = express()
 
-app.use(cors())
+const defaultOrigins = [
+  'https://francoariel.github.io',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:4173',
+  'http://127.0.0.1:5173',
+]
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+  : defaultOrigins
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true)
+    if (allowedOrigins.includes(origin)) return cb(null, true)
+    return cb(new Error(`Origin ${origin} no permitido por CORS`))
+  },
+}))
 app.use(express.json())
 
 app.use('/api/auth',      authRouter)
