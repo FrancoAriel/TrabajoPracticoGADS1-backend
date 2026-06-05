@@ -208,12 +208,15 @@ router.post('/manual', async (req, res) => {
 
     const fecha = String(fechaHora).slice(0, 10)
     let attendanceEvaluation = null
-    if (tipoNorm === 'Entrada' && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
       try {
+        // V4: evalúa las 5 reglas y devuelve un array con un resultado por regla.
         attendanceEvaluation = await evaluateEmployeeDay(supabase, legajoNum, fecha, { dryRun: false })
       } catch (e) {
         console.error('[attendanceEvaluation] post manual fichada', e)
-        attendanceEvaluation = { kind: 'error', legajo: legajoNum, details: { message: e?.message ?? String(e) } }
+        attendanceEvaluation = [
+          { rule: 'meta', kind: 'error', legajo: legajoNum, details: { message: e?.message ?? String(e) } },
+        ]
       }
     }
 
