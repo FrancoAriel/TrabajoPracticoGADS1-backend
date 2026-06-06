@@ -203,7 +203,7 @@ function buildPeriodCards(currentPeriod, history) {
   const closed = new Set((history ?? []).map((h) => h.periodo))
   return [
     { id: prev.toLowerCase().replace(/\s+/g, '-'), label: prev, status: closed.has(prev) ? 'Cerrado' : 'Pendiente' },
-    { id: currentPeriod.toLowerCase().replace(/\s+/g, '-'), label: currentPeriod, status: 'En progreso' },
+    { id: currentPeriod.toLowerCase().replace(/\s+/g, '-'), label: currentPeriod, status: closed.has(currentPeriod) ? 'Cerrado' : 'En progreso' },
     { id: next.toLowerCase().replace(/\s+/g, '-'), label: next, status: 'Futuro' },
   ]
 }
@@ -212,16 +212,26 @@ function buildPeriodCards(currentPeriod, history) {
 router.get('/current', async (req, res) => {
   try {
     const requestedPeriod = req.query.periodo ? String(req.query.periodo) : null
-    const { data: current } = await supabase
+    const { data: currentDraft, error: currentDraftErr } = await supabase
       .from('cierre_mensual')
       .select('*, usuario(nombre)')
       .eq('estado', 'Borrador')
       .order('fecha_cierre', { ascending: false })
       .limit(1)
       .maybeSingle()
+    if (currentDraftErr) throw currentDraftErr
 
-    const currentPeriod = requestedPeriod || current?.periodo || currentPeriodLabel()
+    const currentPeriod = requestedPeriod || currentDraft?.periodo || currentPeriodLabel()
     const periodData = await getPeriodData(currentPeriod)
+
+    const { data: currentPeriodClosure, error: currentPeriodClosureErr } = await supabase
+      .from('cierre_mensual')
+      .select('*, usuario(nombre)')
+      .eq('periodo', currentPeriod)
+      .order('fecha_cierre', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (currentPeriodClosureErr) throw currentPeriodClosureErr
 
     const { data: history, error: historyErr } = await supabase
       .from('cierre_mensual')
@@ -230,6 +240,10 @@ router.get('/current', async (req, res) => {
       .order('fecha_cierre', { ascending: false })
       .limit(6)
     if (historyErr) throw historyErr
+
+    const currentClosure = currentDraft?.periodo === currentPeriod
+      ? currentDraft
+      : currentPeriodClosure
 
     const checklist = [
       {
@@ -249,20 +263,24 @@ router.get('/current', async (req, res) => {
       {
         key: 'export-accountant',
         title: 'Exportar resumen al contador',
-        sub: 'Disponible cuando el cierre esté cerrado',
-        done: false,
+        sub: currentClosure?.estado === 'Cerrado'
+          ? currentClosure.archivo_exportado
+            ? `Archivo generado: ${currentClosure.archivo_exportado}`
+            : 'Período cerrado y listo para exportar'
+          : 'Disponible cuando el cierre esté cerrado',
+        done: currentClosure?.estado === 'Cerrado',
       },
     ]
 
     return ok(res, {
       currentPeriod,
-      currentClosure: current ? {
-        id: current.id_cierre,
-        periodo: current.periodo,
-        fechaCierre: current.fecha_cierre,
-        estado: current.estado,
-        usuario: current.usuario?.nombre,
-        archivoExportado: current.archivo_exportado,
+      currentClosure: currentClosure ? {
+        id: currentClosure.id_cierre,
+        periodo: currentClosure.periodo,
+        fechaCierre: currentClosure.fecha_cierre,
+        estado: currentClosure.estado,
+        usuario: currentClosure.usuario?.nombre,
+        archivoExportado: currentClosure.archivo_exportado,
       } : null,
       stats: {
         liquidated: periodData.totals.approvedNews,
