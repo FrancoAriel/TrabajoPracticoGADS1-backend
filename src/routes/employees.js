@@ -255,7 +255,7 @@ router.delete('/:id', async (req, res) => {
 // POST /employees/:id/assignments
 router.post('/:id/assignments', async (req, res) => {
   try {
-    const { type, targetId, fechaDesde } = req.body
+    const { type, targetId, fechaDesde, fechaHasta } = req.body
     if (!targetId || !fechaDesde)
       return badRequest(res, 'targetId y fechaDesde son requeridos')
 
@@ -277,7 +277,12 @@ router.post('/:id/assignments', async (req, res) => {
 
     const { data, error } = await supabase
       .from('asignacion_horario')
-      .insert({ legajo: req.params.id, id_horario: targetId, fecha_desde: fechaDesde })
+      .insert({
+        legajo: req.params.id,
+        id_horario: targetId,
+        fecha_desde: fechaDesde,
+        fecha_hasta: fechaHasta === undefined ? null : fechaHasta === '' ? null : fechaHasta,
+      })
       .select()
       .single()
     if (error) throw error
