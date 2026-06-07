@@ -53,6 +53,34 @@ function periodOptions() {
   return [-2, -1, 0].map((delta) => currentPeriodLabel(new Date(now.getFullYear(), now.getMonth() + delta, 1))).reverse()
 }
 
+function mapExportHistoryRow(row) {
+  return {
+    id: row.id_exportacion,
+    exportId: row.id_exportacion,
+    reportKey: row.reporte_key,
+    report: row.reporte_label,
+    period: row.periodo,
+    format: row.formato,
+    createdAt: row.fecha_creacion,
+    date: row.fecha_creacion,
+    user: row.usuario_nombre || 'Admin',
+    downloadUrl: row.download_url,
+  }
+}
+
+async function fetchPersistedExportHistory() {
+  const { data, error } = await supabase
+    .from('exportacion')
+    .select('*')
+    .order('fecha_creacion', { ascending: false })
+    .limit(20)
+  if (error) {
+    console.warn('[exports] historial persistido no disponible:', error.message)
+    return null
+  }
+  return (data ?? []).map(mapExportHistoryRow)
+}
+
 function csvEscape(value) {
   if (value == null) return ''
   const text = String(value)
@@ -272,18 +300,20 @@ async function buildExport({ reportKey, period }) {
 }
 
 // GET /exports/options
-router.get('/options', (_req, res) => {
+router.get('/options', async (_req, res) => {
   try {
     const periods = periodOptions()
+    const persistedHistory = await fetchPersistedExportHistory()
+    const history = persistedHistory ?? exportHistory
     return ok(res, {
       stats: {
-        today: exportHistory.filter((e) => String(e.createdAt).slice(0, 10) === new Date().toISOString().slice(0, 10)).length,
-        csv: exportHistory.filter((e) => e.format === 'CSV').length,
+        today: history.filter((e) => String(e.createdAt).slice(0, 10) === new Date().toISOString().slice(0, 10)).length,
+        csv: history.filter((e) => e.format === 'CSV').length,
         pdf: 0,
         xlsx: 0,
       },
       reports: REPORTS.map((r) => ({ ...r, periodOptions: periods })),
-      history: exportHistory,
+      history,
     })
   } catch (err) {
     serverError(res, err)
@@ -314,6 +344,18 @@ router.post('/', async (req, res) => {
     }
     exportHistory.unshift(entry)
     exportFiles.set(exportId, { csv, entry })
+    const { error: persistErr } = await supabase.from('exportacion').insert({
+      id_exportacion: exportId,
+      reporte_key: reportKey,
+      reporte_label: report?.label ?? reportKey,
+      periodo: period,
+      formato: 'CSV',
+      fecha_creacion: entry.createdAt,
+      id_usuario: req.user?.sub ? Number(req.user.sub) : null,
+      usuario_nombre: req.user?.name ?? 'Admin',
+      download_url: entry.downloadUrl,
+    })
+    if (persistErr) console.warn('[exports] no se pudo persistir historial:', persistErr.message)
 
     return res.status(201).json({ data: { exportId, downloadUrl: entry.downloadUrl, history: entry } })
   } catch (err) {
@@ -322,14 +364,31 @@ router.post('/', async (req, res) => {
 })
 
 // GET /exports/:id/download
-router.get('/:id/download', (req, res) => {
-  const file = exportFiles.get(req.params.id)
-  if (!file) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Export no encontrado' } })
+router.get('/:id/download', async (req, res) => {
+  try {
+    let file = exportFiles.get(req.params.id)
+    if (!file) {
+      const { data } = await supabase
+        .from('exportacion')
+        .select('*')
+        .eq('id_exportacion', req.params.id)
+        .maybeSingle()
+      if (data) {
+        const entry = mapExportHistoryRow(data)
+        const csv = await buildExport({ reportKey: entry.reportKey, period: entry.period })
+        file = { csv, entry }
+        exportFiles.set(req.params.id, file)
+      }
+    }
+    if (!file) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Export no encontrado' } })
 
-  const safePeriod = String(file.entry.period ?? 'export').replace(/\s+/g, '_')
-  res.setHeader('Content-Disposition', `attachment; filename="${file.entry.reportKey}_${safePeriod}.csv"`)
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-  res.send(`\uFEFF${file.csv}`)
+    const safePeriod = String(file.entry.period ?? 'export').replace(/\s+/g, '_')
+    res.setHeader('Content-Disposition', `attachment; filename="${file.entry.reportKey}_${safePeriod}.csv"`)
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.send(`\uFEFF${file.csv}`)
+  } catch (err) {
+    serverError(res, err)
+  }
 })
 
 export default router

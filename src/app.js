@@ -12,6 +12,7 @@ import newsRouter       from './routes/news.js'
 import closuresRouter   from './routes/closures.js'
 import exportsRouter    from './routes/exports.js'
 import reasoningRouter  from './routes/reasoning.js'
+import { requireAuth, requireRole } from './lib/auth.js'
 
 const app = express()
 
@@ -36,15 +37,15 @@ app.use(cors({
 app.use(express.json())
 
 app.use('/api/auth',      authRouter)
-app.use('/api/dashboard', dashboardRouter)
-app.use('/api/catalogs',  catalogsRouter)
-app.use('/api/employees', employeesRouter)
-app.use('/api/punches',   punchesRouter)
-app.use('/api/schedules', schedulesRouter)
-app.use('/api/news',      newsRouter)
-app.use('/api/closures',  closuresRouter)
-app.use('/api/exports',   exportsRouter)
-app.use('/api/reasoning', reasoningRouter)
+app.use('/api/dashboard', requireAuth, requireRole('Admin', 'Contador', 'Empleado'), dashboardRouter)
+app.use('/api/catalogs',  requireAuth, catalogsRouter)
+app.use('/api/employees', requireAuth, requireRole('Admin'), employeesRouter)
+app.use('/api/punches',   requireAuth, requireRole('Admin'), punchesRouter)
+app.use('/api/schedules', requireAuth, requireRole('Admin'), schedulesRouter)
+app.use('/api/news',      requireAuth, requireRole('Admin', 'Contador'), newsRouter)
+app.use('/api/closures',  requireAuth, requireRole('Admin', 'Contador'), closuresRouter)
+app.use('/api/exports',   requireAuth, requireRole('Admin', 'Contador'), exportsRouter)
+app.use('/api/reasoning', requireAuth, requireRole('Admin'), reasoningRouter)
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }))
 

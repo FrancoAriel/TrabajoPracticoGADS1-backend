@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import supabase from '../lib/supabase.js'
+import { requireRole } from '../lib/auth.js'
 import { ok, created, notFound, badRequest, serverError } from '../lib/response.js'
 
 const router = Router()
@@ -54,7 +55,7 @@ router.get('/', async (req, res) => {
 })
 
 // POST /news
-router.post('/', async (req, res) => {
+router.post('/', requireRole('Admin'), async (req, res) => {
   try {
     const { legajo, tipo, fechaDesde, fechaHasta, cantidad, unidad, observacion, idUsuarioCreacion } = req.body
     if (!legajo || !tipo || !fechaDesde || !unidad)
@@ -62,7 +63,7 @@ router.post('/', async (req, res) => {
 
     const { data, error } = await supabase
       .from('novedad')
-      .insert({ legajo, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta, cantidad, unidad, estado: 'Pendiente', origen: 'Manual', observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion })
+      .insert({ legajo, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta, cantidad, unidad, estado: 'Pendiente', origen: 'Manual', observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion ?? req.user?.sub ?? null })
       .select()
       .single()
 
@@ -74,7 +75,7 @@ router.post('/', async (req, res) => {
 })
 
 // POST /news/:id/approve
-router.post('/:id/approve', async (req, res) => {
+router.post('/:id/approve', requireRole('Admin'), async (req, res) => {
   try {
     const { error } = await supabase
       .from('novedad')
@@ -89,7 +90,7 @@ router.post('/:id/approve', async (req, res) => {
 })
 
 // POST /news/:id/reject
-router.post('/:id/reject', async (req, res) => {
+router.post('/:id/reject', requireRole('Admin'), async (req, res) => {
   try {
     const { reason } = req.body
     const obs = reason ? `Rechazado: ${reason}` : 'Rechazado'
@@ -108,14 +109,8 @@ router.post('/:id/reject', async (req, res) => {
 })
 
 // DELETE /news/:id
-router.delete('/:id', async (req, res) => {
-  try {
-    const { error } = await supabase.from('novedad').delete().eq('id_novedad', req.params.id)
-    if (error) throw error
-    return res.status(204).send()
-  } catch (err) {
-    serverError(res, err)
-  }
+router.delete('/:id', requireRole('Admin'), async (_req, res) => {
+  return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Las novedades no se eliminan; aprobá, rechazá o registrá una novedad correctiva.' } })
 })
 
 export default router

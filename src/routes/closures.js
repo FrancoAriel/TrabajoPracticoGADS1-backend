@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import supabase from '../lib/supabase.js'
+import { requireRole } from '../lib/auth.js'
 import { ok, created, notFound, badRequest, serverError } from '../lib/response.js'
 
 const router = Router()
@@ -307,14 +308,14 @@ router.get('/current', async (req, res) => {
 })
 
 // POST /closures
-router.post('/', async (req, res) => {
+router.post('/', requireRole('Admin'), async (req, res) => {
   try {
-    const { periodo = currentPeriodLabel(), fechaCierre = new Date().toISOString().slice(0, 10), idUsuario = 1, archivoExportado = '' } = req.body
+    const { periodo = currentPeriodLabel(), fechaCierre = new Date().toISOString().slice(0, 10), idUsuario, archivoExportado = '' } = req.body
     if (!periodRange(periodo)) return badRequest(res, 'periodo debe tener formato "Junio 2025"')
 
     const { data, error } = await supabase
       .from('cierre_mensual')
-      .insert({ periodo, fecha_cierre: fechaCierre, estado: 'Borrador', id_usuario: idUsuario, archivo_exportado: archivoExportado })
+      .insert({ periodo, fecha_cierre: fechaCierre, estado: 'Borrador', id_usuario: idUsuario ?? req.user?.sub ?? 1, archivo_exportado: archivoExportado })
       .select()
       .single()
 
@@ -326,7 +327,7 @@ router.post('/', async (req, res) => {
 })
 
 // POST /closures/:id/run
-router.post('/:id/run', async (req, res) => {
+router.post('/:id/run', requireRole('Admin'), async (req, res) => {
   try {
     const { force = false, archivoExportado = '' } = req.body ?? {}
     const { data: closure, error: fetchErr } = await supabase
@@ -387,14 +388,8 @@ router.post('/:id/run', async (req, res) => {
 })
 
 // DELETE /closures/:id
-router.delete('/:id', async (req, res) => {
-  try {
-    const { error } = await supabase.from('cierre_mensual').delete().eq('id_cierre', req.params.id)
-    if (error) throw error
-    return res.status(204).send()
-  } catch (err) {
-    serverError(res, err)
-  }
+router.delete('/:id', requireRole('Admin'), async (_req, res) => {
+  return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Los cierres son inmutables; no se eliminan desde la API operativa.' } })
 })
 
 export default router
