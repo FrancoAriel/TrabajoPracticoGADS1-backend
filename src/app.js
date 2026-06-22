@@ -12,6 +12,7 @@ import newsRouter       from './routes/news.js'
 import closuresRouter   from './routes/closures.js'
 import exportsRouter    from './routes/exports.js'
 import reasoningRouter  from './routes/reasoning.js'
+import meRouter         from './routes/me.js'
 import { requireAuth, requireRole } from './lib/auth.js'
 
 const app = express()
@@ -46,6 +47,7 @@ app.use('/api/news',      requireAuth, requireRole('Admin', 'Contador'), newsRou
 app.use('/api/closures',  requireAuth, requireRole('Admin', 'Contador'), closuresRouter)
 app.use('/api/exports',   requireAuth, requireRole('Admin', 'Contador'), exportsRouter)
 app.use('/api/reasoning', requireAuth, requireRole('Admin'), reasoningRouter)
+app.use('/api/me',        requireAuth, requireRole('Empleado', 'Admin'), meRouter)
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }))
 
