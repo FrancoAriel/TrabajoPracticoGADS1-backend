@@ -13,6 +13,55 @@ function normalizeTipoFichada(t) {
   return String(t ?? '').trim()
 }
 
+function normalizeOrigenFichada(value) {
+  const s = String(value ?? '').trim().toLowerCase()
+  if (s === 'biometrico' || s === 'biométrico') return 'Biometrico'
+  if (s === 'manual') return 'Manual'
+  if (s === 'qr') return 'Qr'
+  if (s === 'api') return 'Api'
+  if (s === 'pin') return 'Pin'
+  return String(value ?? '').trim()
+}
+
+async function evaluateAfterPunch(legajo, fechaHora) {
+  const fecha = String(fechaHora).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return null
+  try {
+    return await evaluateEmployeeDay(supabase, legajo, fecha, { dryRun: false })
+  } catch (e) {
+    console.error('[attendanceEvaluation] post fichada', e)
+    return [
+      { rule: 'meta', kind: 'error', legajo, details: { message: e?.message ?? String(e) } },
+    ]
+  }
+}
+
+async function insertPunch({ legajo, fechaHora, tipo, origen, esCorreccion = false, idFichadaOriginal = null, idUsuarioRegistro = null }) {
+  const legajoNum = typeof legajo === 'string' ? Number(legajo.replace(/\D/g, '')) : Number(legajo)
+  if (!Number.isFinite(legajoNum)) {
+    const err = new Error('legajo inválido')
+    err.statusCode = 400
+    throw err
+  }
+
+  const { data, error } = await supabase
+    .from('fichada')
+    .insert({
+      legajo: legajoNum,
+      fecha_hora: fechaHora,
+      tipo: normalizeTipoFichada(tipo),
+      origen: normalizeOrigenFichada(origen),
+      es_correccion: esCorreccion,
+      id_fichada_original: idFichadaOriginal,
+      id_usuario_registro: idUsuarioRegistro,
+    })
+    .select()
+    .single()
+
+  if (error) throw error
+  return { data, legajoNum }
+}
+
 /** Carga marcaciones referenciadas por `id_fichada_original` (el embed self-join suele venir vacío en PostgREST). */
 async function originalsByIds(supabase, rows) {
   const ids = [
@@ -177,6 +226,32 @@ router.get('/:id', async (req, res) => {
   }
 })
 
+// POST /punches
+router.post('/', async (req, res) => {
+  try {
+    const { legajo, fechaHora, tipo, origen = 'Api', idUsuarioRegistro } = req.body
+    if (!legajo || !fechaHora || !tipo)
+      return badRequest(res, 'legajo, fechaHora y tipo son requeridos')
+
+    const normalizedOrigin = normalizeOrigenFichada(origen)
+    if (!['Biometrico', 'Manual', 'Qr', 'Api', 'Pin'].includes(normalizedOrigin))
+      return badRequest(res, 'origen inválido')
+
+    const { data, legajoNum } = await insertPunch({
+      legajo,
+      fechaHora,
+      tipo,
+      origen: normalizedOrigin,
+      idUsuarioRegistro: idUsuarioRegistro ?? req.user?.sub ?? null,
+    })
+    const attendanceEvaluation = await evaluateAfterPunch(legajoNum, fechaHora)
+    return created(res, { fichada: data, attendanceEvaluation })
+  } catch (err) {
+    if (err.statusCode === 400) return badRequest(res, err.message)
+    serverError(res, err)
+  }
+})
+
 // POST /punches/manual
 router.post('/manual', async (req, res) => {
   try {
@@ -184,41 +259,14 @@ router.post('/manual', async (req, res) => {
     if (!legajo || !fechaHora || !tipo)
       return badRequest(res, 'legajo, fechaHora y tipo son requeridos')
 
-    const legajoNum =
-      typeof legajo === 'string' ? Number(legajo.replace(/\D/g, '')) : Number(legajo)
-    if (!Number.isFinite(legajoNum))
-      return badRequest(res, 'legajo inválido')
-
-    const tipoNorm = normalizeTipoFichada(tipo)
-
-    const { data, error } = await supabase
-      .from('fichada')
-      .insert({
-        legajo: legajoNum,
-        fecha_hora: fechaHora,
-        tipo: tipoNorm,
-        origen: 'Manual',
-        es_correccion: false,
-        id_usuario_registro: idUsuarioRegistro,
-      })
-      .select()
-      .single()
-
-    if (error) throw error
-
-    const fecha = String(fechaHora).slice(0, 10)
-    let attendanceEvaluation = null
-    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-      try {
-        // V4: evalúa las 5 reglas y devuelve un array con un resultado por regla.
-        attendanceEvaluation = await evaluateEmployeeDay(supabase, legajoNum, fecha, { dryRun: false })
-      } catch (e) {
-        console.error('[attendanceEvaluation] post manual fichada', e)
-        attendanceEvaluation = [
-          { rule: 'meta', kind: 'error', legajo: legajoNum, details: { message: e?.message ?? String(e) } },
-        ]
-      }
-    }
+    const { data, legajoNum } = await insertPunch({
+      legajo,
+      fechaHora,
+      tipo,
+      origen: 'Manual',
+      idUsuarioRegistro: idUsuarioRegistro ?? req.user?.sub ?? null,
+    })
+    const attendanceEvaluation = await evaluateAfterPunch(legajoNum, fechaHora)
 
     return created(res, { fichada: data, attendanceEvaluation })
   } catch (err) {
@@ -241,21 +289,15 @@ router.post('/:id/corrections', async (req, res) => {
 
     if (origErr || !original) return notFound(res, 'Fichada original no encontrada')
 
-    const { data, error } = await supabase
-      .from('fichada')
-      .insert({
-        legajo: original.legajo,
-        fecha_hora: fechaHora,
-        tipo,
-        origen: 'Manual',
-        es_correccion: true,
-        id_fichada_original: Number(req.params.id),
-        id_usuario_registro: idUsuarioRegistro,
-      })
-      .select()
-      .single()
-
-    if (error) throw error
+    const { data } = await insertPunch({
+      legajo: original.legajo,
+      fechaHora,
+      tipo,
+      origen: 'Manual',
+      esCorreccion: true,
+      idFichadaOriginal: Number(req.params.id),
+      idUsuarioRegistro: idUsuarioRegistro ?? req.user?.sub ?? null,
+    })
     return created(res, data)
   } catch (err) {
     serverError(res, err)
@@ -263,14 +305,8 @@ router.post('/:id/corrections', async (req, res) => {
 })
 
 // DELETE /punches/:id
-router.delete('/:id', async (req, res) => {
-  try {
-    const { error } = await supabase.from('fichada').delete().eq('id_fichada', req.params.id)
-    if (error) throw error
-    return res.status(204).send()
-  } catch (err) {
-    serverError(res, err)
-  }
+router.delete('/:id', async (_req, res) => {
+  return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Las fichadas no se eliminan; registrá una corrección trazable.' } })
 })
 
 export default router

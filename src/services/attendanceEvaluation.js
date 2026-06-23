@@ -7,6 +7,7 @@
  *  3. Salida anticipada (Fijo / Rotativo, lee tolerancia_salida_min)
  *  4. Horas extra      (lee umbral_horas_extra_min; 50% día hábil / 100% domingo o feriado)
  *  5. Doble fichada    (dos fichadas del mismo tipo dentro de la ventana global)
+ *  6. Descanso         (pausa menor o mayor que descanso_minimo_min cuando hay 4 fichadas)
  *
  * Cada llamada a `evaluateEmployeeDay` retorna un array de resultados (uno por regla
  * que se intentó aplicar). Esto permite que un mismo día genere varias novedades
@@ -133,7 +134,7 @@ async function fetchHorarioMeta(supabase, idHorario) {
   const { data, error } = await supabase
     .from('horario')
     .select(
-      'id_horario, nombre, tipo, tolerancia_entrada_min, tolerancia_salida_min, umbral_horas_extra_min',
+      'id_horario, nombre, tipo, tolerancia_entrada_min, tolerancia_salida_min, descanso_minimo_min, umbral_horas_extra_min',
     )
     .eq('id_horario', idHorario)
     .single()
@@ -369,6 +370,8 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
     )
   }
 
+  evaluations.push(await evaluateDescanso(supabase, legajo, fecha, horario, dryRun))
+
   return evaluations
 }
 
@@ -602,6 +605,61 @@ async function evaluateDobleFichada(supabase, legajo, fecha, dryRun) {
   ]
 }
 
+async function evaluateDescanso(supabase, legajo, fecha, horario, dryRun) {
+  const descansoMin = Number(horario.descanso_minimo_min ?? 0) || 0
+  if (descansoMin <= 0) {
+    return result('descanso', 'skipped', legajo, { reason: 'sin_descanso_configurado' })
+  }
+
+  const fichadas = await allFichadasOfDay(supabase, legajo, fecha)
+  if (fichadas.length < 4) {
+    return result('descanso', 'skipped', legajo, { reason: 'fichadas_insuficientes_para_descanso' })
+  }
+
+  const salidaDescanso = fichadas[1]
+  const regresoDescanso = fichadas[2]
+  if (salidaDescanso.tipo !== 'Salida' || regresoDescanso.tipo !== 'Entrada') {
+    return result('descanso', 'skipped', legajo, { reason: 'secuencia_de_descanso_no_detectada' })
+  }
+
+  const salidaMs = new Date(salidaDescanso.fecha_hora).getTime()
+  const regresoMs = new Date(regresoDescanso.fecha_hora).getTime()
+  if (!Number.isFinite(salidaMs) || !Number.isFinite(regresoMs) || regresoMs <= salidaMs) {
+    return result('descanso', 'skipped', legajo, { reason: 'marcas_de_descanso_invalidas' })
+  }
+
+  const descansoReal = Math.round((regresoMs - salidaMs) / 60000)
+  if (descansoReal === descansoMin) {
+    return result('descanso', 'ok', legajo, { reason: 'descanso_en_parametro', descansoReal, descansoMin })
+  }
+
+  const tipo = descansoReal < descansoMin ? 'Descanso_No_Tomado' : 'Descanso_Excedido'
+  const cantidad = Math.abs(descansoReal - descansoMin)
+  if (await hasNovedadOnDate(supabase, legajo, tipo, fecha)) {
+    return result('descanso', 'skipped', legajo, { reason: 'descanso_ya_registrado', tipo })
+  }
+
+  const row = newNovedadRow({
+    legajo,
+    tipo,
+    fecha,
+    cantidad,
+    unidad: 'Minutos',
+    observacion:
+      tipo === 'Descanso_No_Tomado'
+        ? `Descanso automático: pausa de ${descansoReal} min, menor al mínimo configurado de ${descansoMin} min.`
+        : `Descanso automático: pausa de ${descansoReal} min, excede el parámetro configurado de ${descansoMin} min.`,
+  })
+  await insertNovedad(supabase, row, dryRun)
+  return result('descanso', 'created', legajo, {
+    tipo,
+    minutos: cantidad,
+    descansoReal,
+    descansoMin,
+    dryRun,
+  })
+}
+
 /* ─────────────────────────────────────────────────────────
  *  Evaluación masiva
  * ───────────────────────────────────────────────────────── */
@@ -653,6 +711,8 @@ export async function reprocessRange(supabase, desde, hasta, { legajos = null, d
     'Horas_Extra_50',
     'Horas_Extra_100',
     'Doble_Fichada',
+    'Descanso_No_Tomado',
+    'Descanso_Excedido',
   ]
 
   // 1. Limpiar novedades automáticas previas dentro del rango.

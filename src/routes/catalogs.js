@@ -32,7 +32,7 @@ router.get('/', async (_req, res) => {
       ],
       estadosNovedad:  ['pendiente', 'aprobada', 'rechazada'],
       rolesUsuario:    ['admin', 'empleado', 'contador'],
-      formatosExport:  ['CSV', 'PDF', 'XLSX'],
+      formatosExport:  ['CSV'],
       horarios:        (horarios ?? []).map(h => ({ id: h.id_horario, nombre: h.nombre, tipo: h.tipo })),
       ciclos:          (ciclos ?? []).map(c => ({ id: c.id_ciclo, nombre: c.nombre, duracionDias: c.duracion_dias }))
     })

@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import supabase from '../lib/supabase.js'
 import { ok, created, notFound, badRequest, serverError } from '../lib/response.js'
+import { evaluateEmployeeDay } from '../services/attendanceEvaluation.js'
 
 /** Etiquetas de UI alta/edición ↔ enum origen_fichada en BD */
 const FICHADA_UI_A_DB = {
@@ -244,9 +245,12 @@ router.patch('/:id', async (req, res) => {
 // DELETE /employees/:id
 router.delete('/:id', async (req, res) => {
   try {
-    const { error } = await supabase.from('empleado').delete().eq('legajo', req.params.id)
+    const { error } = await supabase
+      .from('empleado')
+      .update({ estado: 'Inactivo', fecha_egreso: new Date().toISOString().slice(0, 10) })
+      .eq('legajo', req.params.id)
     if (error) throw error
-    return res.status(204).send()
+    return ok(res, { legajo: Number(req.params.id), estado: 'Inactivo' })
   } catch (err) {
     serverError(res, err)
   }
@@ -255,12 +259,11 @@ router.delete('/:id', async (req, res) => {
 // POST /employees/:id/assignments
 router.post('/:id/assignments', async (req, res) => {
   try {
-    const { type, targetId, fechaDesde } = req.body
+    const { type, targetId, fechaDesde, fechaHasta } = req.body
     if (!targetId || !fechaDesde)
       return badRequest(res, 'targetId y fechaDesde son requeridos')
 
     if (type === 'ciclo') {
-      const { fechaHasta } = req.body
       const { data, error } = await supabase
         .from('empleado_ciclo')
         .insert({
@@ -277,7 +280,12 @@ router.post('/:id/assignments', async (req, res) => {
 
     const { data, error } = await supabase
       .from('asignacion_horario')
-      .insert({ legajo: req.params.id, id_horario: targetId, fecha_desde: fechaDesde })
+      .insert({
+        legajo: req.params.id,
+        id_horario: targetId,
+        fecha_desde: fechaDesde,
+        fecha_hasta: fechaHasta === undefined ? null : fechaHasta === '' ? null : fechaHasta,
+      })
       .select()
       .single()
     if (error) throw error
@@ -299,7 +307,7 @@ router.post('/:id/news', async (req, res) => {
       .insert({
         legajo: req.params.id, tipo, fecha_desde: fechaDesde, fecha_hasta: fechaHasta,
         cantidad, unidad, estado: 'Pendiente', origen: 'Manual',
-        observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion
+        observacion, fecha_creacion: new Date().toISOString(), id_usuario_creacion: idUsuarioCreacion ?? req.user?.sub ?? null
       })
       .select()
       .single()
@@ -320,12 +328,17 @@ router.post('/:id/manual-punches', async (req, res) => {
 
     const { data, error } = await supabase
       .from('fichada')
-      .insert({ legajo: req.params.id, fecha_hora: fechaHora, tipo, origen: 'Manual', es_correccion: false, id_usuario_registro: idUsuarioRegistro })
+      .insert({ legajo: req.params.id, fecha_hora: fechaHora, tipo, origen: 'Manual', es_correccion: false, id_usuario_registro: idUsuarioRegistro ?? req.user?.sub ?? null })
       .select()
       .single()
 
     if (error) throw error
-    return created(res, data)
+    let attendanceEvaluation = null
+    const fecha = String(fechaHora).slice(0, 10)
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      attendanceEvaluation = await evaluateEmployeeDay(supabase, Number(req.params.id), fecha, { dryRun: false })
+    }
+    return created(res, { fichada: data, attendanceEvaluation })
   } catch (err) {
     serverError(res, err)
   }
