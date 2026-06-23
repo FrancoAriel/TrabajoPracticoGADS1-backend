@@ -6,6 +6,13 @@ import { normalizeTipoFichada, normalizeOrigenFichada, insertPunch, evaluateAfte
 
 const router = Router()
 
+const MONTHS = [
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+]
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
+
 const EMPLOYEE_REQUEST_TYPES = new Set([
   'Licencia',
   'Vacaciones',
@@ -18,6 +25,24 @@ const TYPE_TO_UNIT = {
   Vacaciones: 'Dias',
   Permiso_especial: 'Dias',
   Justificacion: 'Dias',
+}
+
+function currentMonthRange(date = new Date()) {
+  const y = date.getFullYear()
+  const m = date.getMonth()
+  const last = new Date(y, m + 1, 0)
+  return {
+    desde: `${y}-${String(m + 1).padStart(2, '0')}-01`,
+    hasta: `${y}-${String(m + 1).padStart(2, '0')}-${String(last.getDate()).padStart(2, '0')}`,
+    periodo: `${MONTHS[m]} ${y}`,
+  }
+}
+
+function resolveRange(query) {
+  const base = currentMonthRange()
+  const desde = query.desde && YMD_RE.test(String(query.desde)) ? String(query.desde) : base.desde
+  const hasta = query.hasta && YMD_RE.test(String(query.hasta)) ? String(query.hasta) : base.hasta
+  return { desde, hasta, periodo: base.periodo }
 }
 
 function legajoFromUser(req, res) {
@@ -353,6 +378,63 @@ router.post('/news', async (req, res) => {
 
     if (error) throw error
     return created(res, data)
+  } catch (err) {
+    serverError(res, err)
+  }
+})
+
+// GET /me/summary?desde=&hasta= — mini resumen del período (desde feature/maxi)
+router.get('/summary', async (req, res) => {
+  try {
+    const legajo = legajoFromUser(req, res)
+    if (!legajo) return
+
+    const { desde, hasta, periodo } = resolveRange(req.query)
+
+    const [{ data: entradas, error: entErr }, { data: novedades, error: novErr }] = await Promise.all([
+      supabase
+        .from('fichada')
+        .select('fecha_hora')
+        .eq('legajo', legajo)
+        .eq('tipo', 'Entrada')
+        .gte('fecha_hora', `${desde}T00:00:00`)
+        .lte('fecha_hora', `${hasta}T23:59:59.999`),
+      supabase
+        .from('novedad')
+        .select('tipo, cantidad, estado')
+        .eq('legajo', legajo)
+        .gte('fecha_desde', desde)
+        .lte('fecha_desde', hasta),
+    ])
+    if (entErr) throw entErr
+    if (novErr) throw novErr
+
+    const presentDays = new Set((entradas ?? []).map((e) => String(e.fecha_hora).slice(0, 10))).size
+
+    let tardanzaMin = 0
+    let he50Min = 0
+    let he100Min = 0
+    let ausencias = 0
+    let pendingNews = 0
+    for (const n of novedades ?? []) {
+      const cant = Number(n.cantidad) || 0
+      if (n.tipo === 'Tardanza') tardanzaMin += cant
+      if (n.tipo === 'Horas_Extra_50') he50Min += cant
+      if (n.tipo === 'Horas_Extra_100') he100Min += cant
+      if (n.tipo === 'Ausencia') ausencias += cant || 1
+      if (n.estado === 'Pendiente') pendingNews += 1
+    }
+
+    return ok(res, {
+      periodo,
+      range: { desde, hasta },
+      presentDays,
+      tardanzaMin,
+      he50Min,
+      he100Min,
+      ausencias,
+      pendingNews,
+    })
   } catch (err) {
     serverError(res, err)
   }
