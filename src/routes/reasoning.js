@@ -11,6 +11,26 @@ const router = Router()
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/
 
+function isoYmdLocal(date = new Date()) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+/** Si el rango incluye el mes en curso, no procesar más allá de ayer. */
+function clampHastaToYesterday(desde, hasta) {
+  const now = new Date()
+  const monthStart = isoYmdLocal(new Date(now.getFullYear(), now.getMonth(), 1))
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const hastaAyer = isoYmdLocal(yesterday)
+  if (String(hasta) >= monthStart && String(hasta) > hastaAyer) {
+    return hastaAyer
+  }
+  return hasta
+}
+
 /**
  * Agrupa resultados por kind y por regla para facilitar lectura en el cliente.
  * Mantiene `results` completo para depuración.
@@ -110,7 +130,12 @@ router.post('/reprocess-range', async (req, res) => {
         ? legajos.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
         : null
 
-    const all = await reprocessRange(supabase, String(desde), String(hasta), {
+    const hastaEfectivo = clampHastaToYesterday(String(desde), String(hasta))
+    if (hastaEfectivo < String(desde)) {
+      return badRequest(res, 'No hay días completos para reprocesar en ese rango (el período actual recién comenzó).')
+    }
+
+    const all = await reprocessRange(supabase, String(desde), hastaEfectivo, {
       legajos: lista,
       dryRun: dry,
     })
@@ -118,7 +143,7 @@ router.post('/reprocess-range', async (req, res) => {
     const summary = summarize(all)
     return ok(res, {
       desde,
-      hasta,
+      hasta: hastaEfectivo,
       legajos: lista,
       dryRun: dry,
       ...summary,

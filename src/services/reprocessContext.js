@@ -307,3 +307,35 @@ export async function buildReprocessContext(supabase, desde, hasta, legajos) {
     },
   }
 }
+
+export function createContextStore(ctx) {
+  return {
+    async getEmployee(legajo) {
+      return ctx.getEmployee(legajo)
+    },
+    async resolveHorario(legajo, fecha) {
+      return ctx.resolveHorario(legajo, fecha)
+    },
+    async getHorarioMeta(idHorario) {
+      return ctx.getHorarioMeta(idHorario)
+    },
+    async getHorarioDia(idHorario, dow) {
+      return ctx.getHorarioDia(idHorario, dow)
+    },
+    async getFichadas(legajo, fecha) {
+      return ctx.getFichadas(legajo, fecha)
+    },
+    async hasAutomaticNovedad(legajo, tipo, fecha) {
+      return ctx.hasAutomaticNovedad(legajo, tipo, fecha)
+    },
+    async hasAusenciaCovering(legajo, fecha) {
+      return ctx.hasAusenciaCovering(legajo, fecha)
+    },
+    async hasNovedadOnDate(legajo, tipo, fecha) {
+      return ctx.hasNovedadOnDate(legajo, tipo, fecha)
+    },
+    async insertNovedad(row, dryRun) {
+      ctx.recordInsert(row, dryRun)
+    },
+  }
+}

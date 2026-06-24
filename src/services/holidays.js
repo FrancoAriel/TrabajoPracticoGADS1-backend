@@ -67,6 +67,16 @@ export async function isHoliday(ymd) {
   return set.has(ymd)
 }
 
+/** Precarga feriados de todos los años que cubre un rango YYYY-MM-DD. */
+export async function preloadHolidaysForRange(desde, hasta) {
+  const y1 = Number(String(desde).slice(0, 4))
+  const y2 = Number(String(hasta).slice(0, 4))
+  if (!Number.isFinite(y1) || !Number.isFinite(y2)) return
+  const years = []
+  for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y += 1) years.push(y)
+  await Promise.all(years.map((year) => loadYear(year)))
+}
+
 /**
  * Borra el caché (útil para tests o reprocesamiento forzado).
  */

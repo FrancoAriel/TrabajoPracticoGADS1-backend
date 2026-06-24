@@ -19,6 +19,7 @@
 
 import { isHoliday } from './holidays.js'
 import { DOUBLE_PUNCH_WINDOW_MIN } from '../lib/constants.js'
+import { buildReprocessContext, createContextStore, runInBatches } from './reprocessContext.js'
 
 /* ─────────────────────────────────────────────────────────
  *  Utilidades de fecha / hora
@@ -270,6 +271,43 @@ async function insertNovedad(supabase, row, dryRun) {
   if (error) throw error
 }
 
+function createSupabaseStore(supabase) {
+  return {
+    async getEmployee(legajo) {
+      const { data, error } = await supabase
+        .from('empleado')
+        .select('legajo, estado')
+        .eq('legajo', legajo)
+        .maybeSingle()
+      if (error) throw error
+      return data
+    },
+    resolveHorario: (legajo, fecha) => resolveHorarioForDate(supabase, legajo, fecha),
+    getHorarioMeta: (idHorario) => fetchHorarioMeta(supabase, idHorario),
+    getHorarioDia: (idHorario, dow) => fetchHorarioDia(supabase, idHorario, dow),
+    getFichadas: (legajo, fecha) => allFichadasOfDay(supabase, legajo, fecha),
+    hasAutomaticNovedad: (legajo, tipo, fecha) => hasAutomaticNovedad(supabase, legajo, tipo, fecha),
+    hasAusenciaCovering: (legajo, fecha) => hasAusenciaCoveringDate(supabase, legajo, fecha),
+    hasNovedadOnDate: (legajo, tipo, fecha) => hasNovedadOnDate(supabase, legajo, tipo, fecha),
+    insertNovedad: (row, dryRun) => insertNovedad(supabase, row, dryRun),
+  }
+}
+
+async function firstEntradaFromStore(store, legajo, fecha) {
+  const fichadas = await store.getFichadas(legajo, fecha)
+  return fichadas.find((f) => f.tipo === 'Entrada') ?? null
+}
+
+async function lastSalidaFromStore(store, legajo, fecha) {
+  const fichadas = await store.getFichadas(legajo, fecha)
+  const salidas = fichadas.filter((f) => f.tipo === 'Salida')
+  return salidas[salidas.length - 1] ?? null
+}
+
+function isActiveEmployee(emp) {
+  return emp && String(emp.estado || '').toLowerCase() === 'activo'
+}
+
 function result(rule, kind, legajo, details) {
   return { rule, kind, legajo, details }
 }
@@ -285,34 +323,32 @@ function result(rule, kind, legajo, details) {
  * @returns {Promise<Array<{rule:string, kind:'created'|'ok'|'skipped'|'error', legajo:number, details:object}>>}
  */
 export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = false } = {}) {
+  return evaluateEmployeeDayWithStore(createSupabaseStore(supabase), legajo, fecha, { dryRun })
+}
+
+export async function evaluateEmployeeDayWithStore(store, legajo, fecha, { dryRun = false } = {}) {
   const dow = isoWeekdayFromYmd(fecha)
   if (!dow) {
     return [result('meta', 'skipped', legajo, { reason: 'fecha_invalida' })]
   }
 
-  const { data: emp, error: empErr } = await supabase
-    .from('empleado')
-    .select('legajo, estado')
-    .eq('legajo', legajo)
-    .maybeSingle()
-  if (empErr) throw empErr
-  if (!emp || emp.estado !== 'Activo') {
+  const emp = await store.getEmployee(legajo)
+  if (!isActiveEmployee(emp)) {
     return [result('meta', 'skipped', legajo, { reason: 'empleado_inactivo' })]
   }
 
-  const resolved = await resolveHorarioForDate(supabase, legajo, fecha)
+  const resolved = await store.resolveHorario(legajo, fecha)
   if (!resolved) {
     return [result('meta', 'skipped', legajo, { reason: 'sin_asignacion_horario' })]
   }
 
-  const horario = await fetchHorarioMeta(supabase, resolved.idHorario)
-  const hd = await fetchHorarioDia(supabase, resolved.idHorario, dow)
+  const horario = await store.getHorarioMeta(resolved.idHorario)
+  const hd = await store.getHorarioDia(resolved.idHorario, dow)
   const flexible = horario.tipo === 'Flexible'
 
   const evaluations = []
 
-  // Regla 5 — Doble fichada: aplica siempre que haya fichadas, independientemente del tipo de día.
-  evaluations.push(...(await evaluateDobleFichada(supabase, legajo, fecha, dryRun)))
+  evaluations.push(...(await evaluateDobleFichada(store, legajo, fecha, dryRun)))
 
   if (!hd?.es_laborable) {
     evaluations.push(
@@ -321,20 +357,17 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
     return evaluations
   }
 
-  const entrada = await firstEntradaOfDay(supabase, legajo, fecha)
-  const salida = await lastSalidaOfDay(supabase, legajo, fecha)
+  const entrada = await firstEntradaFromStore(store, legajo, fecha)
+  const salida = await lastSalidaFromStore(store, legajo, fecha)
 
-  // Regla 2 — Ausencia
   if (!entrada) {
-    evaluations.push(await evaluateAusencia(supabase, legajo, fecha, horario, dryRun))
-    // Sin entrada no tiene sentido evaluar tardanza/salida/horas extra del día.
+    evaluations.push(await evaluateAusencia(store, legajo, fecha, horario, dryRun))
     return evaluations
   }
 
-  // Regla 1 — Tardanza (solo Fijo / Rotativo)
   if (!flexible) {
     evaluations.push(
-      await evaluateTardanza(supabase, legajo, fecha, horario, hd, entrada, dryRun),
+      await evaluateTardanza(store, legajo, fecha, horario, hd, entrada, dryRun),
     )
   } else {
     evaluations.push(
@@ -344,10 +377,9 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
     )
   }
 
-  // Regla 3 — Salida anticipada (solo Fijo / Rotativo)
   if (!flexible) {
     evaluations.push(
-      await evaluateSalidaAnticipada(supabase, legajo, fecha, horario, hd, salida, dryRun),
+      await evaluateSalidaAnticipada(store, legajo, fecha, horario, hd, salida, dryRun),
     )
   } else {
     evaluations.push(
@@ -357,10 +389,9 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
     )
   }
 
-  // Regla 4 — Horas extra (Fijo / Rotativo)
   if (!flexible) {
     evaluations.push(
-      await evaluateHorasExtra(supabase, legajo, fecha, horario, hd, salida, dryRun),
+      await evaluateHorasExtra(store, legajo, fecha, horario, hd, salida, dryRun),
     )
   } else {
     evaluations.push(
@@ -370,7 +401,7 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
     )
   }
 
-  evaluations.push(await evaluateDescanso(supabase, legajo, fecha, horario, dryRun))
+  evaluations.push(await evaluateDescanso(store, legajo, fecha, horario, dryRun))
 
   return evaluations
 }
@@ -379,11 +410,11 @@ export async function evaluateEmployeeDay(supabase, legajo, fecha, { dryRun = fa
  *  Reglas individuales
  * ───────────────────────────────────────────────────────── */
 
-async function evaluateAusencia(supabase, legajo, fecha, horario, dryRun) {
-  if (await hasAutomaticNovedad(supabase, legajo, 'Ausencia', fecha)) {
+async function evaluateAusencia(store, legajo, fecha, horario, dryRun) {
+  if (await store.hasAutomaticNovedad(legajo, 'Ausencia', fecha)) {
     return result('ausencia', 'skipped', legajo, { reason: 'ausencia_automatica_ya_registrada' })
   }
-  if (await hasAusenciaCoveringDate(supabase, legajo, fecha)) {
+  if (await store.hasAusenciaCovering(legajo, fecha)) {
     return result('ausencia', 'skipped', legajo, { reason: 'ausencia_manual_u_otra_ya_cubre' })
   }
   const row = newNovedadRow({
@@ -394,7 +425,7 @@ async function evaluateAusencia(supabase, legajo, fecha, horario, dryRun) {
     unidad: 'Dias',
     observacion: `Ausencia automática: sin fichada de entrada (${fecha}).`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return result('ausencia', 'created', legajo, {
     tipo: 'Ausencia',
     dryRun,
@@ -402,7 +433,7 @@ async function evaluateAusencia(supabase, legajo, fecha, horario, dryRun) {
   })
 }
 
-async function evaluateTardanza(supabase, legajo, fecha, horario, hd, entrada, dryRun) {
+async function evaluateTardanza(store, legajo, fecha, horario, hd, entrada, dryRun) {
   const tol = Number(horario.tolerancia_entrada_min ?? 0) || 0
   const expectedMin = timeStrToMinutes(hd.hora_entrada)
   if (expectedMin == null) {
@@ -416,7 +447,7 @@ async function evaluateTardanza(supabase, legajo, fecha, horario, hd, entrada, d
   if (actualMin <= limite) {
     return result('tardanza', 'ok', legajo, { reason: 'a_tiempo', entrada: entrada.fecha_hora })
   }
-  if (await hasNovedadOnDate(supabase, legajo, 'Tardanza', fecha)) {
+  if (await store.hasNovedadOnDate(legajo, 'Tardanza', fecha)) {
     return result('tardanza', 'skipped', legajo, { reason: 'tardanza_ya_registrada' })
   }
   const minutosTarde = actualMin - limite
@@ -430,7 +461,7 @@ async function evaluateTardanza(supabase, legajo, fecha, horario, hd, entrada, d
       `Tardanza automática: entrada a las ${fmtHm(actualMin)}, ` +
       `esperada hasta ${fmtHm(limite)} (${fmtHm(expectedMin)} + ${tol} min tolerancia).`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return result('tardanza', 'created', legajo, {
     tipo: 'Tardanza',
     minutos: minutosTarde,
@@ -439,7 +470,7 @@ async function evaluateTardanza(supabase, legajo, fecha, horario, hd, entrada, d
   })
 }
 
-async function evaluateSalidaAnticipada(supabase, legajo, fecha, horario, hd, salida, dryRun) {
+async function evaluateSalidaAnticipada(store, legajo, fecha, horario, hd, salida, dryRun) {
   if (!salida) {
     return result('salida_anticipada', 'skipped', legajo, { reason: 'sin_fichada_de_salida' })
   }
@@ -459,7 +490,7 @@ async function evaluateSalidaAnticipada(supabase, legajo, fecha, horario, hd, sa
       salida: salida.fecha_hora,
     })
   }
-  if (await hasNovedadOnDate(supabase, legajo, 'Salida_Anticipada', fecha)) {
+  if (await store.hasNovedadOnDate(legajo, 'Salida_Anticipada', fecha)) {
     return result('salida_anticipada', 'skipped', legajo, {
       reason: 'salida_anticipada_ya_registrada',
     })
@@ -475,7 +506,7 @@ async function evaluateSalidaAnticipada(supabase, legajo, fecha, horario, hd, sa
       `Salida anticipada automática: salida a las ${fmtHm(actualMin)}, ` +
       `mínima permitida ${fmtHm(limite)} (${fmtHm(expectedMin)} − ${tol} min tolerancia).`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return result('salida_anticipada', 'created', legajo, {
     tipo: 'Salida_Anticipada',
     minutos: minutosAnticipados,
@@ -484,7 +515,7 @@ async function evaluateSalidaAnticipada(supabase, legajo, fecha, horario, hd, sa
   })
 }
 
-async function evaluateHorasExtra(supabase, legajo, fecha, horario, hd, salida, dryRun) {
+async function evaluateHorasExtra(store, legajo, fecha, horario, hd, salida, dryRun) {
   if (!salida) {
     return result('horas_extra', 'skipped', legajo, { reason: 'sin_fichada_de_salida' })
   }
@@ -512,7 +543,7 @@ async function evaluateHorasExtra(supabase, legajo, fecha, horario, hd, salida, 
   const esFeriado = await isHoliday(fecha)
   const tipoNovedad = esDomingo || esFeriado ? 'Horas_Extra_100' : 'Horas_Extra_50'
 
-  if (await hasNovedadOnDate(supabase, legajo, tipoNovedad, fecha)) {
+  if (await store.hasNovedadOnDate(legajo, tipoNovedad, fecha)) {
     return result('horas_extra', 'skipped', legajo, { reason: 'horas_extra_ya_registradas' })
   }
 
@@ -532,7 +563,7 @@ async function evaluateHorasExtra(supabase, legajo, fecha, horario, hd, salida, 
       `Horas extra automáticas (${motivo}): salida a las ${fmtHm(actualMin)} vs ` +
       `esperada ${fmtHm(expectedMin)} (umbral ${umbral} min). Exceso ${exceso} min.`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return result('horas_extra', 'created', legajo, {
     tipo: tipoNovedad,
     minutos: exceso,
@@ -542,8 +573,8 @@ async function evaluateHorasExtra(supabase, legajo, fecha, horario, hd, salida, 
   })
 }
 
-async function evaluateDobleFichada(supabase, legajo, fecha, dryRun) {
-  const fichadas = await allFichadasOfDay(supabase, legajo, fecha)
+async function evaluateDobleFichada(store, legajo, fecha, dryRun) {
+  const fichadas = await store.getFichadas(legajo, fecha)
   if (fichadas.length < 2) {
     return [result('doble_fichada', 'ok', legajo, { reason: 'menos_de_dos_fichadas' })]
   }
@@ -572,7 +603,7 @@ async function evaluateDobleFichada(supabase, legajo, fecha, dryRun) {
     return [result('doble_fichada', 'ok', legajo, { reason: 'sin_duplicidad_en_ventana' })]
   }
 
-  if (await hasNovedadOnDate(supabase, legajo, 'Doble_Fichada', fecha)) {
+  if (await store.hasNovedadOnDate(legajo, 'Doble_Fichada', fecha)) {
     return [
       result('doble_fichada', 'skipped', legajo, {
         reason: 'doble_fichada_ya_registrada',
@@ -595,7 +626,7 @@ async function evaluateDobleFichada(supabase, legajo, fecha, dryRun) {
       `Doble fichada detectada (ventana ${DOUBLE_PUNCH_WINDOW_MIN} min). ` +
       `Día marcado para revisión. Pares: ${resumen}.`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return [
     result('doble_fichada', 'created', legajo, {
       tipo: 'Doble_Fichada',
@@ -605,13 +636,13 @@ async function evaluateDobleFichada(supabase, legajo, fecha, dryRun) {
   ]
 }
 
-async function evaluateDescanso(supabase, legajo, fecha, horario, dryRun) {
+async function evaluateDescanso(store, legajo, fecha, horario, dryRun) {
   const descansoMin = Number(horario.descanso_minimo_min ?? 0) || 0
   if (descansoMin <= 0) {
     return result('descanso', 'skipped', legajo, { reason: 'sin_descanso_configurado' })
   }
 
-  const fichadas = await allFichadasOfDay(supabase, legajo, fecha)
+  const fichadas = await store.getFichadas(legajo, fecha)
   if (fichadas.length < 4) {
     return result('descanso', 'skipped', legajo, { reason: 'fichadas_insuficientes_para_descanso' })
   }
@@ -635,7 +666,7 @@ async function evaluateDescanso(supabase, legajo, fecha, horario, dryRun) {
 
   const tipo = descansoReal < descansoMin ? 'Descanso_No_Tomado' : 'Descanso_Excedido'
   const cantidad = Math.abs(descansoReal - descansoMin)
-  if (await hasNovedadOnDate(supabase, legajo, tipo, fecha)) {
+  if (await store.hasNovedadOnDate(legajo, tipo, fecha)) {
     return result('descanso', 'skipped', legajo, { reason: 'descanso_ya_registrado', tipo })
   }
 
@@ -650,7 +681,7 @@ async function evaluateDescanso(supabase, legajo, fecha, horario, dryRun) {
         ? `Descanso automático: pausa de ${descansoReal} min, menor al mínimo configurado de ${descansoMin} min.`
         : `Descanso automático: pausa de ${descansoReal} min, excede el parámetro configurado de ${descansoMin} min.`,
   })
-  await insertNovedad(supabase, row, dryRun)
+  await store.insertNovedad(row, dryRun)
   return result('descanso', 'created', legajo, {
     tipo,
     minutos: cantidad,
@@ -715,6 +746,18 @@ export async function reprocessRange(supabase, desde, hasta, { legajos = null, d
     'Descanso_Excedido',
   ]
 
+  let targetLegajos = lista
+  if (!targetLegajos?.length) {
+    const { data: empleados, error } = await supabase
+      .from('empleado')
+      .select('legajo')
+      .eq('estado', 'Activo')
+    if (error) throw error
+    targetLegajos = (empleados ?? []).map((e) => Number(e.legajo)).filter((n) => n > 0)
+  }
+
+  if (!targetLegajos.length) return []
+
   // 1. Limpiar novedades automáticas previas dentro del rango.
   if (!dryRun) {
     let q = supabase
@@ -729,29 +772,31 @@ export async function reprocessRange(supabase, desde, hasta, { legajos = null, d
     if (error) throw error
   }
 
-  // 2. Re-evaluar día por día.
+  // 2. Precargar datos del rango (fichadas, horarios, novedades) y evaluar en memoria.
+  const ctx = await buildReprocessContext(supabase, desde, hasta, targetLegajos)
+  ctx.dryRun = dryRun
+  const store = createContextStore(ctx)
   const results = []
+  const concurrency = Math.min(12, Math.max(4, targetLegajos.length))
+
   for (const fecha of iterateDateRange(desde, hasta)) {
-    if (lista?.length) {
-      for (const legajo of lista) {
-        try {
-          const arr = await evaluateEmployeeDay(supabase, legajo, fecha, { dryRun })
-          for (const r of arr) results.push({ ...r, fecha })
-        } catch (err) {
-          results.push({
-            rule: 'meta',
-            kind: 'error',
-            legajo,
-            fecha,
-            details: { message: err.message },
-          })
-        }
+    await runInBatches(targetLegajos, concurrency, async (legajo) => {
+      try {
+        const arr = await evaluateEmployeeDayWithStore(store, legajo, fecha, { dryRun })
+        for (const r of arr) results.push({ ...r, fecha })
+      } catch (err) {
+        results.push({
+          rule: 'meta',
+          kind: 'error',
+          legajo,
+          fecha,
+          details: { message: err.message },
+        })
       }
-    } else {
-      const arr = await evaluateAllEmployeesForDate(supabase, fecha, { dryRun })
-      for (const r of arr) results.push({ ...r, fecha })
-    }
+    })
   }
+
+  await ctx.flushInserts(supabase)
 
   return results
 }

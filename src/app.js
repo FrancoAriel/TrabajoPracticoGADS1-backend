@@ -7,6 +7,7 @@ import dashboardRouter  from './routes/dashboard.js'
 import catalogsRouter   from './routes/catalogs.js'
 import employeesRouter  from './routes/employees.js'
 import punchesRouter    from './routes/punches.js'
+import pinPunchRouter   from './routes/pinPunch.js'
 import schedulesRouter  from './routes/schedules.js'
 import newsRouter       from './routes/news.js'
 import closuresRouter   from './routes/closures.js'
@@ -41,6 +42,7 @@ app.use('/api/auth',      authRouter)
 app.use('/api/dashboard', requireAuth, requireRole('Admin', 'Contador', 'Empleado'), dashboardRouter)
 app.use('/api/catalogs',  requireAuth, catalogsRouter)
 app.use('/api/employees', requireAuth, requireRole('Admin'), employeesRouter)
+app.use('/api/punches/pin', pinPunchRouter)
 app.use('/api/punches',   requireAuth, requireRole('Admin'), punchesRouter)
 app.use('/api/schedules', requireAuth, requireRole('Admin'), schedulesRouter)
 app.use('/api/news',      requireAuth, requireRole('Admin', 'Contador'), newsRouter)

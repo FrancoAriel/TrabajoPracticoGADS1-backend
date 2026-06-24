@@ -41,6 +41,119 @@ function addMonths(date, delta) {
   return new Date(date.getFullYear(), date.getMonth() + delta, 1)
 }
 
+function periodToDate(periodo) {
+  const range = periodRange(periodo)
+  if (!range) return null
+  const [year, month] = range.desde.split('-').map(Number)
+  return new Date(year, month - 1, 1)
+}
+
+function comparePeriods(a, b) {
+  const da = periodToDate(a)
+  const db = periodToDate(b)
+  if (!da || !db) return 0
+  return da.getTime() - db.getTime()
+}
+
+function normalizeEstado(estado) {
+  return String(estado || '').trim().toLowerCase()
+}
+
+/** Si hay cierre cerrado para el período, tiene prioridad sobre borradores sueltos. */
+function resolveCurrentClosure(closuresForPeriod = []) {
+  const rows = closuresForPeriod ?? []
+  const closed = rows.find((c) => normalizeEstado(c.estado) === 'cerrado')
+  if (closed) return closed
+  const draft = rows.find((c) => normalizeEstado(c.estado) === 'borrador')
+  return draft ?? rows[0] ?? null
+}
+
+function isPeriodClosed(periodo, history = [], closure = null) {
+  if (closure?.periodo === periodo && normalizeEstado(closure?.estado) === 'cerrado') {
+    return true
+  }
+  return (history ?? []).some(
+    (h) => h.periodo === periodo && normalizeEstado(h.estado) === 'cerrado',
+  )
+}
+
+function buildPeriodCards(selectedPeriod, history, availablePeriods = []) {
+  const anchorLabel = selectedPeriod || currentPeriodLabel()
+  const anchorDate = periodToDate(anchorLabel)
+  if (!anchorDate) return []
+
+  const calendarCurrent = currentPeriodLabel()
+  const closed = new Set((history ?? []).map((h) => h.periodo))
+  const metaByLabel = new Map((availablePeriods ?? []).map((p) => [p.label, p]))
+
+  return [-1, 0, 1].map((delta) => {
+    const label = currentPeriodLabel(addMonths(anchorDate, delta))
+    const meta = metaByLabel.get(label)
+    const isFuture = meta?.isFuture ?? comparePeriods(label, calendarCurrent) > 0
+
+    let status = meta?.status
+    if (closed.has(label) && comparePeriods(label, calendarCurrent) <= 0) {
+      status = 'Cerrado'
+    } else if (!status) {
+      if (isFuture) status = 'Futuro'
+      else if (closed.has(label)) status = 'Cerrado'
+      else if (label === calendarCurrent) status = 'En progreso'
+      else status = 'Pendiente'
+    }
+
+    return {
+      id: label.toLowerCase().replace(/\s+/g, '-'),
+      label,
+      status,
+      isFuture,
+    }
+  })
+}
+
+function buildAvailablePeriods(history, drafts = []) {
+  const now = new Date()
+  const calendarCurrent = currentPeriodLabel(now)
+  const statusByPeriod = new Map()
+
+  for (const item of history ?? []) {
+    if (!statusByPeriod.has(item.periodo)) statusByPeriod.set(item.periodo, 'Cerrado')
+  }
+  for (const item of drafts ?? []) {
+    if (!statusByPeriod.has(item.periodo)) statusByPeriod.set(item.periodo, 'Borrador')
+  }
+
+  const labels = new Set(statusByPeriod.keys())
+  labels.add(calendarCurrent)
+  for (let i = 11; i >= 0; i -= 1) {
+    labels.add(currentPeriodLabel(addMonths(now, -i)))
+  }
+
+  return [...labels]
+    .sort(comparePeriods)
+    .map((label) => {
+      const isFuture = comparePeriods(label, calendarCurrent) > 0
+      const isCurrentMonth = label === calendarCurrent
+      const storedStatus = statusByPeriod.get(label)
+      const status = storedStatus === 'Cerrado'
+        ? 'Cerrado'
+        : isFuture
+          ? 'Futuro'
+          : isCurrentMonth
+            ? 'En curso'
+            : storedStatus === 'Borrador'
+              ? 'Borrador'
+              : 'Pendiente'
+
+      return {
+        label,
+        status,
+        isFuture,
+        isCurrentMonth,
+        closable: !isFuture && status !== 'Cerrado',
+      }
+    })
+}
+
 function minutesToText(minutes) {
   const total = Math.round(Number(minutes) || 0)
   if (total <= 0) return '0'
@@ -197,54 +310,49 @@ async function getPeriodData(periodo) {
   }
 }
 
-function buildPeriodCards(currentPeriod, history) {
-  const now = new Date()
-  const prev = currentPeriodLabel(addMonths(now, -1))
-  const next = currentPeriodLabel(addMonths(now, 1))
-  const closed = new Set((history ?? []).map((h) => h.periodo))
-  return [
-    { id: prev.toLowerCase().replace(/\s+/g, '-'), label: prev, status: closed.has(prev) ? 'Cerrado' : 'Pendiente' },
-    { id: currentPeriod.toLowerCase().replace(/\s+/g, '-'), label: currentPeriod, status: closed.has(currentPeriod) ? 'Cerrado' : 'En progreso' },
-    { id: next.toLowerCase().replace(/\s+/g, '-'), label: next, status: 'Futuro' },
-  ]
-}
-
 // GET /closures/current
 router.get('/current', async (req, res) => {
   try {
     const requestedPeriod = req.query.periodo ? String(req.query.periodo) : null
-    const { data: currentDraft, error: currentDraftErr } = await supabase
-      .from('cierre_mensual')
-      .select('*, usuario(nombre)')
-      .eq('estado', 'Borrador')
-      .order('fecha_cierre', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    if (currentDraftErr) throw currentDraftErr
-
-    const currentPeriod = requestedPeriod || currentDraft?.periodo || currentPeriodLabel()
+    const calendarCurrent = currentPeriodLabel()
+    const currentPeriod = requestedPeriod || calendarCurrent
     const periodData = await getPeriodData(currentPeriod)
 
-    const { data: currentPeriodClosure, error: currentPeriodClosureErr } = await supabase
-      .from('cierre_mensual')
-      .select('*, usuario(nombre)')
-      .eq('periodo', currentPeriod)
-      .order('fecha_cierre', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    if (currentPeriodClosureErr) throw currentPeriodClosureErr
+    const [{ data: closuresForPeriod, error: closuresForPeriodErr }, { data: history, error: historyErr }, { data: drafts, error: draftsErr }] =
+      await Promise.all([
+        supabase
+          .from('cierre_mensual')
+          .select('*, usuario(nombre)')
+          .eq('periodo', currentPeriod)
+          .order('fecha_cierre', { ascending: false }),
+        supabase
+          .from('cierre_mensual')
+          .select('id_cierre, periodo, fecha_cierre, estado, archivo_exportado')
+          .eq('estado', 'Cerrado')
+          .order('fecha_cierre', { ascending: false })
+          .limit(24),
+        supabase
+          .from('cierre_mensual')
+          .select('periodo, estado')
+          .eq('estado', 'Borrador'),
+      ])
 
-    const { data: history, error: historyErr } = await supabase
-      .from('cierre_mensual')
-      .select('id_cierre, periodo, fecha_cierre, estado, archivo_exportado')
-      .eq('estado', 'Cerrado')
-      .order('fecha_cierre', { ascending: false })
-      .limit(6)
+    if (closuresForPeriodErr) throw closuresForPeriodErr
     if (historyErr) throw historyErr
+    if (draftsErr) throw draftsErr
 
-    const currentClosure = currentDraft?.periodo === currentPeriod
-      ? currentDraft
-      : currentPeriodClosure
+    const currentClosure = resolveCurrentClosure(closuresForPeriod ?? [])
+
+    const isFuture = comparePeriods(currentPeriod, calendarCurrent) > 0
+    const isCurrentMonth = currentPeriod === calendarCurrent
+    const isClosedClosure = isPeriodClosed(currentPeriod, history ?? [], currentClosure)
+    const canClose = !isFuture && !isClosedClosure && periodData.totals.pendingNews === 0
+
+    const availablePeriods = buildAvailablePeriods(history ?? [], drafts ?? [])
+
+    const closedHistoryRow = (history ?? []).find((h) => h.periodo === currentPeriod)
+    const closedExportFile = closedHistoryRow?.archivo_exportado
+      || (normalizeEstado(currentClosure?.estado) === 'cerrado' ? currentClosure?.archivo_exportado : '')
 
     const checklist = [
       {
@@ -264,25 +372,38 @@ router.get('/current', async (req, res) => {
       {
         key: 'export-accountant',
         title: 'Exportar resumen al contador',
-        sub: currentClosure?.estado === 'Cerrado'
-          ? currentClosure.archivo_exportado
-            ? `Archivo generado: ${currentClosure.archivo_exportado}`
+        sub: isClosedClosure
+          ? closedExportFile
+            ? `Archivo generado: ${closedExportFile}`
             : 'Período cerrado y listo para exportar'
           : 'Disponible cuando el cierre esté cerrado',
-        done: currentClosure?.estado === 'Cerrado',
+        done: isClosedClosure,
       },
     ]
 
     return ok(res, {
       currentPeriod,
-      currentClosure: currentClosure ? {
+      isFuture,
+      isCurrentMonth,
+      isClosed: isClosedClosure,
+      canClose,
+      periodRange: periodData.range,
+      availablePeriods,
+      currentClosure: isClosedClosure ? {
+        id: closedHistoryRow?.id_cierre ?? currentClosure?.id_cierre ?? null,
+        periodo: currentPeriod,
+        fechaCierre: closedHistoryRow?.fecha_cierre ?? currentClosure?.fecha_cierre ?? null,
+        estado: 'Cerrado',
+        usuario: currentClosure?.usuario?.nombre ?? null,
+        archivoExportado: closedExportFile || null,
+      } : (currentClosure ? {
         id: currentClosure.id_cierre,
         periodo: currentClosure.periodo,
         fechaCierre: currentClosure.fecha_cierre,
         estado: currentClosure.estado,
         usuario: currentClosure.usuario?.nombre,
         archivoExportado: currentClosure.archivo_exportado,
-      } : null,
+      } : null),
       stats: {
         liquidated: periodData.totals.approvedNews,
         pending: periodData.totals.pendingNews,
@@ -291,7 +412,7 @@ router.get('/current', async (req, res) => {
         tardanzas: periodData.totals.tardanzas,
         ausencias: periodData.totals.unjustifiedAbsences,
       },
-      periodCards: buildPeriodCards(currentPeriod, history ?? []),
+      periodCards: buildPeriodCards(currentPeriod, history ?? [], availablePeriods),
       history: (history ?? []).map((h) => ({
         id: h.id_cierre,
         periodo: h.periodo,
